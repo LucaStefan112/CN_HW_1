@@ -12,19 +12,34 @@
 #define dataNotSent "Could not send data to server!"
 #define dataNotReceived "Could not receive data from server!"
 
+// System messages:
+#define connected "Connected to server!\n"
+#define comandExceedsLength "Command too long!\n"
+#define unknownCommand "Command not found or invalid!\n"
+
+// Comands:
+#define loginPrefix "login : "
+#define loggedUsers "get-logged-users"
+#define procInfoPrefix "get-proc-info : "
+#define logout "logout"
+#define quit "quit"
+
 // Max command size:
 #define MAX_BUFFER_SIZE 50
 
 // File descriptors for FIFO's:
 int serverInput, serverOutput;
 
+// Client token:
+int token;
+
 // Buffers for reading and writing data:
 char terminalInput[100], serverData[100];
 
 int openServerChannels(){
 	// Opening FIFO's:
-	int serverInput = open(serverIn, O_WRONLY);
-	int serverOutput = open(serverOut, O_RDONLY);
+	serverInput = open(serverIn, O_WRONLY);
+	serverOutput = open(serverOut, O_RDONLY);
 
 	// Error checking:
 	if(serverInput == -1 || serverOutput == -1){
@@ -32,7 +47,7 @@ int openServerChannels(){
 		return 0;
 	}
 
-	printf("Connected to server!\n");
+	printf(connected);
 
 	return 1;
 }
@@ -46,19 +61,34 @@ void readDataFromTerminal(){
 
 int isInputValid(){
 	// Check input length:
-	if(strlen(terminalInput) > MAX_BUFFER_SIZE + 1){
-		printf("Command too long!\n");
+	if(strlen(terminalInput) > MAX_BUFFER_SIZE){
+		printf(comandExceedsLength);
 		return 0;
 	}
+	// Validate command:
+	else if(
+		strstr(terminalInput, loginPrefix) != 0 &&
+		strcmp(terminalInput, loggedUsers) &&
+		strstr(terminalInput, procInfoPrefix) != 0 &&
+		strcmp(terminalInput, logout) &&
+		strcmp(terminalInput, quit)){
+			printf(unknownCommand);
+			return 0;
+		}
 	
 	return 1;
 }
 
 int sendDataToServer(){
-	// Send first buffer size:
-	int dataSize = strlen(terminalInput);
+	// Send authentification token:
+	if(write(serverInput, &token, sizeof(int)) == -1){
+		printf(dataNotSent);
+		return 0;
+	}
 
-	if(write(serverInput, &dataSize, 4) == -1){
+	// Send buffer size:
+	int dataSize = strlen(terminalInput);
+	if(write(serverInput, &dataSize, sizeof(int)) == -1){
 		printf(dataNotSent);
 		return 0;
 	}
@@ -73,8 +103,21 @@ int sendDataToServer(){
 }
 
 int receiveDataFromServer(){
-	// Get response from server:
-	if(read(serverOutput, serverData, sizeof(serverData)) == -1){
+	// Get token from server:
+	if(read(serverOutput, &token, sizeof(int)) == -1){
+		printf(dataNotReceived);
+		return 0;
+	}
+
+	// Get response buffer size:
+	int bufferSize = 0;
+	if(read(serverOutput, &bufferSize, sizeof(int)) == -1){
+		printf(dataNotReceived);
+		return 0;
+	}
+
+	// Get response:
+	if(read(serverOutput, serverData, bufferSize) == -1){
 		printf(dataNotReceived);
 		return 0;
 	}
@@ -82,11 +125,6 @@ int receiveDataFromServer(){
 
 void showData(){
 	printf("%s\n", serverData);
-}
-
-int mustQuit(){
-	// Checks if the last command was to quit the app:
-	return strcmp("quit", terminalInput);
 }
 
 void communicateWithServer(){
@@ -100,7 +138,8 @@ void communicateWithServer(){
 		else 
 			break;
 		
-		if(mustQuit())
+		// Quit token:
+		if(token == -1)
 			break;
 	}
 }
