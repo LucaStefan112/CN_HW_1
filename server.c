@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <stdlib.h>
+#include <utmp.h>
 
 // FIFO names:
 #define serverIn "SERVER_INPUT"
@@ -212,20 +213,26 @@ int respondToCLient(){
 			return sendDataToClient();
 		}
 		
-		// Concatenate all logged users:
+		// Create utmp pointer:
 		strcpy(response, "\0");
+		struct utmp* utmpPointer = getutent();
+		
+		// Concatenate data:
+		while(utmpPointer){
+			strcat(response, utmpPointer->ut_user);
+			strcat(response, " \0");
+			strcat(response, utmpPointer->ut_host);
+			strcat(response, " \0");
+			strcat(response, utmpPointer->ut_tv.tv_sec);
+			strcat(response, "\n\0");
 
-		for(int i = 0; i < numberOfLoggedUsers; i++){
-			strcat(response, loggedUsersList[i]);
-			int index = strlen(response);
-			response[index] = '\n';
-			response[index + 1] = 0;
+			utmpPointer = getutent();
 		}
 
 		return respondToCLient();
 	}
 
-	else if(){
+	else if(1){
 		
 	}
 }
