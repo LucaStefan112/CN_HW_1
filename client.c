@@ -8,24 +8,24 @@
 #define serverOut "SERVER_OUTPUT"
 
 // Error messages:
-#define fifoNotOppened "Could not open FIFO's!"
-#define dataNotSent "Could not send data to server!"
-#define dataNotReceived "Could not receive data from server!"
+#define fifoNotOppened "Could not open FIFO's!\n"
+#define dataNotSent "Could not send data to server!\n"
+#define dataNotReceived "Could not receive data from server!\n"
 
 // System messages:
+#define started "Client started!\n"
 #define connected "Connected to server!\n"
 #define comandExceedsLength "Command too long!\n"
-#define unknownCommand "Command not found or invalid!\n"
+#define commandMustBeAlphanum "Command must be use safe characters(a/A-z/Z, 0-9, '-', '_', ' ', ':')!\n"
 
 // Comands:
-#define loginPrefix "login : "
-#define loggedUsers "get-logged-users"
-#define procInfoPrefix "get-proc-info : "
-#define logout "logout"
 #define quit "quit"
 
 // Max command size:
 #define MAX_BUFFER_SIZE 50
+
+// Safe characters list:
+#define safeCharacters "_- :,.+=/?!@#$"
 
 // File descriptors for FIFO's:
 int serverInput, serverOutput;
@@ -37,6 +37,9 @@ int token;
 char terminalInput[100], serverData[100];
 
 int openServerChannels(){
+
+	printf(started);
+	
 	// Opening FIFO's:
 	serverInput = open(serverIn, O_WRONLY);
 	serverOutput = open(serverOut, O_RDONLY);
@@ -60,22 +63,33 @@ void readDataFromTerminal(){
 }
 
 int isInputValid(){
+	// Check empty command:
+	if(strlen(terminalInput) == 0)
+		return 0;
+
 	// Check input length:
 	if(strlen(terminalInput) > MAX_BUFFER_SIZE){
 		printf(comandExceedsLength);
+		
+		// Empty stdin buffer:
+		int c;
+		while ((c = getchar()) != '\n' && c != EOF);
+
 		return 0;
 	}
-	// Validate command:
-	else if(
-		strstr(terminalInput, loginPrefix) != 0 &&
-		strcmp(terminalInput, loggedUsers) &&
-		strstr(terminalInput, procInfoPrefix) != 0 &&
-		strcmp(terminalInput, logout) &&
-		strcmp(terminalInput, quit)){
-			printf(unknownCommand);
+
+	// Check if input is alfa-num or safe character:
+	for(int i = 0; terminalInput[i]; i++)
+		if(!(
+			'a' <= terminalInput[i] && terminalInput[i] <= 'z' ||
+			'A' <= terminalInput[i] && terminalInput[i] <= 'Z' ||
+			'0' <= terminalInput[i] && terminalInput[i] <= '9' ||
+			strchr(safeCharacters, terminalInput[i])
+		)){
+			printf(commandMustBeAlphanum);
 			return 0;
 		}
-	
+
 	return 1;
 }
 
@@ -131,12 +145,8 @@ void communicateWithServer(){
 	// Infinite loop:
 	while(1){
 		readDataFromTerminal();
-		
 		if(isInputValid() && sendDataToServer() && receiveDataFromServer())
 			showData();
-		// If there is any error, quit:
-		else 
-			break;
 		
 		// Quit token:
 		if(token == -1)
