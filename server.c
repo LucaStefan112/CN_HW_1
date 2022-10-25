@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <utmp.h>
 #include <regex.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
 
 // FIFO names:
 #define serverIn "SERVER_INPUT"
@@ -24,11 +26,14 @@
 #define connected "New client connected!\n"
 
 // Error messages:
-#define fifoNotOppened "Could not open FIFO's!"
-#define dataNotSent "Could not send data to client!"
-#define dataNotReceived "Could not receive data from client!"
-#define bufferSizeMismatch "The buffer size does not match the payload value!"
-#define bufferOverflow "The request is too large!"
+#define fifoNotOppened "Could not open FIFO's!\n"
+#define dataNotSent "Could not send data to client!\n"
+#define dataNotReceived "Could not receive data from client!\n"
+#define bufferSizeMismatch "The buffer size does not match the payload value!\n"
+#define bufferOverflow "The request is too large!\n"
+#define pipeError "Pipe error!\n"
+#define socketpairError "Socketpair error!\n"
+#define forkError "Fork error!\n"
 
 // Comands:
 #define loginPrefix "login : *"
@@ -40,17 +45,17 @@
 // Responses:
 #define badRequest "Bad request!\n"
 #define alreadyLogged "The user is already logged!\n"
-#define loggedIn "Loggen in!\n"
+#define loggedIn "Logged in!\n"
 #define userNotFound "User not found!\n"
 #define clientAlreadyLogged "You are already logged in!\n"
 #define notLoggedIn "You are not logged in!\n"
 #define invalidProcess "The process does not exist!\n"
 #define loggedOut "Logged out!\n"
-#define quitMessage "Goof Bye!\n"
+#define quitMessage "Good bye!\n"
 #define unknownCommand "Command does not exist!\n"
 
 // Maximum buffer size:
-#define MAX_BUFFER_SIZE 50
+#define MAX_BUFFER_SIZE 500
 
 // Safe characters list:
 #define safeCharacters "_- :,.+=/?!@#$"
@@ -68,10 +73,13 @@ int bufferSize;
 int clientToken;
 
 // Buffers for reading and writing data:
-char request[100], response[100];
+char request[MAX_BUFFER_SIZE], response[MAX_BUFFER_SIZE];
 
 // List of all logged users;
 char loggedUsersList[maxLoggedUsers][100];
+
+// Quitting signal:
+int quitting = 0;
 
 // List of logged users tokens:
 int loggedUsersTokens[maxLoggedUsers], numberOfLoggedUsers;
@@ -117,7 +125,9 @@ int readDataFromClient(){
 		printf(dataNotReceived);
 		return 0;
 	}
-	printf("Token: %d; Size: %d; Data: %s;", clientToken, bufferSize, request);
+
+	// Use first "bufferSize" characters:
+	request[bufferSize] = 0;
 
 	return 1;
 }
@@ -129,6 +139,7 @@ void sendDataToClient(){
 		write(serverOutput, &bufferSize, sizeof(int)) == -1 ||
 		write(serverOutput, response, bufferSize) == -1)
 			printf(dataNotSent);
+		printf("%d %d %s", clientToken, bufferSize, response);
 }
 
 int isRequestValid(){
@@ -137,15 +148,8 @@ int isRequestValid(){
     regcomp(&loginPrefixRegex, loginPrefix, 0);
 	regcomp(&processInfoPrefixRegex, processInfoPrefix, 0);
 
-	// Check data length:
-	if(bufferSize != strlen(request)){
-		strcpy(response, badRequest);
-		sendDataToClient();
-		return 0;
-	}
-
 	// Check buffer size:
-	else if(bufferSize > MAX_BUFFER_SIZE){
+	if(bufferSize > MAX_BUFFER_SIZE){
 		strcpy(response, badRequest);
 		sendDataToClient();
 		return 0;
@@ -170,7 +174,6 @@ int isRequestValid(){
 			if(clientToken == loggedUsersTokens[i])
 				return 1;
 		
-		strcpy(response, badRequest);
 		sendDataToClient();
 		return 0;
 	}
@@ -185,6 +188,49 @@ int respondToCLient(){
 
 	// Command "login : username":
 	if(!regexec(&loginPrefixRegex, request, 0, NULL, 0)){
+		// Check if client is already logged in:
+		if(clientToken){
+			strcpy(response, clientAlreadyLogged);
+			sendDataToClient();
+			return 0;
+		}
+		
+		int thisPipe[2], pid;
+		
+		if(pipe(thisPipe) == -1){
+			printf(pipeError);
+			return 1;
+		}
+
+		if((pid = fork()) == -1){
+			printf(forkError);
+			return 1;
+		}
+		
+		// Parent code:
+		if(pid){
+			close(thisPipe[1]);
+			int thisBufferSize;
+			
+			read(thisPipe[0], &clientToken, sizeof(int));
+			read(thisPipe[0], &thisBufferSize, sizeof(int));
+			read(thisPipe[0], response, thisBufferSize);
+			read(thisPipe[0], &numberOfLoggedUsers, sizeof(int));
+
+			for(int i = 0; i < numberOfLoggedUsers; i++)
+				read(thisPipe[0], &loggedUsersTokens[i], sizeof(int));
+
+			response[thisBufferSize] = 0;
+			wait(NULL);
+
+			sendDataToClient();
+			close(thisPipe[0]);
+			return 0;
+		}
+
+		// Child code:
+		close(thisPipe[0]);
+
 		// Getting username from request:
 		char user[100];
 		strcpy(user, request + strlen(loginPrefix) - 1);
@@ -195,7 +241,14 @@ int respondToCLient(){
 				// Account is already in use at the moment:
 				if(!strcmp(user, loggedUsersList[i])){
 					strcpy(response, alreadyLogged);
-					sendDataToClient();
+					
+					int dontSendTokens = 0;
+					int thisBufferSize = strlen(response);
+					write(thisPipe[1], &clientToken, sizeof(int));
+					write(thisPipe[1], &thisBufferSize, sizeof(int));
+					write(thisPipe[1], response, strlen(response));
+					write(thisPipe[1], &dontSendTokens, sizeof(int));
+					quitting = 1;
 					return 0;
 				}
 
@@ -225,27 +278,83 @@ int respondToCLient(){
 					numberOfLoggedUsers++;
 
 					strcpy(response, loggedIn);
-					sendDataToClient();
+					int thisBufferSize = strlen(response);
+					write(thisPipe[1], &clientToken, sizeof(int));
+					write(thisPipe[1], &thisBufferSize, sizeof(int));
+					write(thisPipe[1], response, strlen(response));
+					write(thisPipe[1], &numberOfLoggedUsers, sizeof(int));
+					for(int i = 0; i < numberOfLoggedUsers; i++)
+						write(thisPipe[1], &loggedUsersTokens[i], sizeof(int));
+
+					quitting = 1;
 					return 0;
 				}
 			}
-			
+			int dontSendTokens = 0;
 			strcpy(response, userNotFound);
-			sendDataToClient();
+			int thisBufferSize = strlen(response);
+			write(thisPipe[1], &clientToken, sizeof(int));
+			write(thisPipe[1], &thisBufferSize, sizeof(int));
+			write(thisPipe[1], response, strlen(response));
+			write(thisPipe[1], &dontSendTokens, sizeof(int));
+			quitting = 1;
 			return 0;
 		}
+
 		// Client logged in another account:
+		
 		strcpy(response, clientAlreadyLogged);
-		sendDataToClient();
+		int dontSendTokens = 0;
+		int thisBufferSize = strlen(response);
+		write(thisPipe[1], &clientToken, sizeof(int));
+		write(thisPipe[1], &thisBufferSize, sizeof(int));
+		write(thisPipe[1], response, strlen(response));
+		write(thisPipe[1], &dontSendTokens, sizeof(int));
+		quitting = 1;
 		return 0;
 	}
 
 	// Command "get-logged-users":
 	else if(!strcmp(request, loggedUsers)){
+		int thisPipe[2], pid;
+		
+		if(pipe(thisPipe) == -1){
+			printf(pipeError);
+			return 1;
+		}
+
+		if((pid = fork()) == -1){
+			printf(forkError);
+			return 1;
+		}
+		
+		// Parent code:
+		if(pid){
+			close(thisPipe[1]);
+			int thisBufferSize;
+			
+			read(thisPipe[0], &clientToken, sizeof(int));
+			read(thisPipe[0], &thisBufferSize, sizeof(int));
+			read(thisPipe[0], response, thisBufferSize);
+			response[thisBufferSize] = 0;
+			wait(NULL);
+
+			sendDataToClient();
+			close(thisPipe[0]);
+			return 0;
+		}
+
+		// Child code:
+		close(thisPipe[0]);
+		
 		//Check if client is authentificated:
 		if(!clientToken){
 			strcpy(response, notLoggedIn);
-			sendDataToClient();
+			int thisBufferSize = strlen(response);
+			write(thisPipe[1], &clientToken, sizeof(int));
+			write(thisPipe[1], &thisBufferSize, sizeof(int));
+			write(thisPipe[1], response, strlen(response));
+			quitting = 1;
 			return 0;
 		}
 		
@@ -264,17 +373,23 @@ int respondToCLient(){
 			}while(seconds);
 			secondsString[stringLength] = 0;
 
-			strcat(response, utmpPointer->ut_user);
-			strcat(response, " \0");
-			strcat(response, utmpPointer->ut_host);
-			strcat(response, " \0");
-			strcat(response, secondsString);
-			strcat(response, "\n\0");
-
+			if(strlen(utmpPointer->ut_user) && strlen(utmpPointer->ut_host) && strlen(secondsString)){
+			 	strcat(response, "User: \0");
+			 	strcat(response, utmpPointer->ut_user);
+			 	strcat(response, " Host: \0");
+			 	strcat(response, utmpPointer->ut_host);
+			 	strcat(response, " Seconds active: \0");
+			 	strcat(response, secondsString);
+			 	strcat(response, "\n\0");
+			}
 			utmpPointer = getutent();
 		}
 
-		sendDataToClient();
+		int thisBufferSize = strlen(response);
+		write(thisPipe[1], &clientToken, sizeof(int));
+		write(thisPipe[1], &thisBufferSize, sizeof(int));
+		write(thisPipe[1], response, strlen(response));
+		quitting = 1;
 		return 0;
 	}
 
@@ -287,18 +402,56 @@ int respondToCLient(){
 			return 0;
 		}
 
-		char pid[20], processFilePath[50] = "\0";
-		strcpy(pid, request + strlen(processInfoPrefix) - 1);
+		int thisSocketpair[2], pid;
+		
+		if(socketpair(AF_UNIX, SOCK_STREAM, 0, thisSocketpair) == -1){
+			printf(socketpairError);
+			return 1;
+		}
 
+		if((pid = fork()) == -1){
+			printf(forkError);
+			return 1;
+		}
+		
+		// Parent code:
+		if(pid){
+			close(thisSocketpair[1]);
+			int thisBufferSize;
+			
+			read(thisSocketpair[0], &thisBufferSize, sizeof(int));
+			read(thisSocketpair[0], response, thisBufferSize);
+
+			for(int i = 0; i < numberOfLoggedUsers; i++)
+				read(thisSocketpair[0], &loggedUsersTokens[i], sizeof(int));
+
+			response[thisBufferSize] = 0;
+			wait(NULL);
+
+			sendDataToClient();
+			close(thisSocketpair[0]);
+			return 0;
+		}
+
+		// Child code:
+		close(thisSocketpair[0]);
+
+		char pidProcess[20], processFilePath[50] = "\0";
+		strcpy(pidProcess, request + strlen(processInfoPrefix) - 1);
+
+		// Creating path to process file:
 		strcat(processFilePath, "/proc/");
-		strcat(processFilePath, pid);
+		strcat(processFilePath, pidProcess);
 		strcat(processFilePath, "/status");
 
 		FILE* filePointer = fopen(processFilePath, "r");
 
 		if(!filePointer){
 			strcpy(response, invalidProcess);
-			sendDataToClient();
+			int thisBufferSize = strlen(response);
+			write(thisSocketpair[1], &thisBufferSize, sizeof(int));
+			write(thisSocketpair[1], response, strlen(response));
+			quitting = 1;
 			return 0;
 		}
 
@@ -315,7 +468,10 @@ int respondToCLient(){
 			)
 				strcat(response, field);
 
-		sendDataToClient();
+		int thisBufferSize = strlen(response);
+		write(thisSocketpair[1], &thisBufferSize, sizeof(int));
+		write(thisSocketpair[1], response, strlen(response));
+		quitting = 1;
 		return 0;
 	}
 
@@ -345,22 +501,12 @@ int respondToCLient(){
 
 	// Command "quit":
 	else if(!strcmp(request, quit)){
-		// If client is logged in:
-		if(clientToken)
-			// Removing user from logged users:
-			for(int i = 0; i < numberOfLoggedUsers; i++)
-				if(clientToken == loggedUsersTokens[i]){
-					loggedUsersTokens[i] = loggedUsersTokens[numberOfLoggedUsers - 1];
-					strcpy(loggedUsersList[i], loggedUsersList[numberOfLoggedUsers - 1]);
-					numberOfLoggedUsers--;
-					break;
-				}
-		
-		clientToken = 0;
+		clientToken = -1;
 		strcpy(response, quitMessage);
 		sendDataToClient();
 
 		// Closing app signal:
+		quitting = 1;
 		return 0;
 	}
 
@@ -372,9 +518,15 @@ int respondToCLient(){
 	}
 }
 
+void closeServerChannels(){
+	// Close FIFO's:
+	close(serverInput);
+	close(serverOutput);
+}
+
 void communicateWithClient(){
 	//Infinite loop:
-	while(1)
+	while(!quitting)
 		// Execute stages sequentially:
 		if(!readDataFromClient() || !isRequestValid() || !respondToCLient());
 }
@@ -388,6 +540,8 @@ int main(){
 		return 1;
 
 	communicateWithClient();
+
+	closeServerChannels();
 
 	return 0;
 }

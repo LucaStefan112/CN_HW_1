@@ -22,7 +22,7 @@
 #define quit "quit"
 
 // Max command size:
-#define MAX_BUFFER_SIZE 50
+#define MAX_BUFFER_SIZE 500
 
 // Safe characters list:
 #define safeCharacters "_- :,.+=/?!@#$"
@@ -34,7 +34,10 @@ int serverInput, serverOutput;
 int token;
 
 // Buffers for reading and writing data:
-char terminalInput[100], serverData[100];
+char terminalInput[MAX_BUFFER_SIZE], serverData[MAX_BUFFER_SIZE];
+
+// Quit signal:
+int quitting = 0;
 
 int openServerChannels(){
 
@@ -108,11 +111,11 @@ int sendDataToServer(){
 	}
 
 	// Send actual data:
-	if(write(serverInput, terminalInput, strlen(terminalInput)) == -1){
+	if(write(serverInput, terminalInput, dataSize) == -1){
 		printf(dataNotSent);
 		return 0;
 	}
-
+	
 	return 1;
 }
 
@@ -135,22 +138,27 @@ int receiveDataFromServer(){
 		printf(dataNotReceived);
 		return 0;
 	}
+
+	// Use first "bufferSize" characters:
+	serverData[bufferSize] = 0;
+
+	// Quit token:
+	if(token == -1)
+		quitting = 1;
+
+	return 1;
 }
 
 void showData(){
-	printf("%s\n", serverData);
+	printf("%s", serverData);
 }
 
 void communicateWithServer(){
 	// Infinite loop:
-	while(1){
+	while(!quitting){
 		readDataFromTerminal();
 		if(isInputValid() && sendDataToServer() && receiveDataFromServer())
 			showData();
-		
-		// Quit token:
-		if(token == -1)
-			break;
 	}
 }
 
