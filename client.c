@@ -4,15 +4,12 @@
 int serverInput, serverOutput;
 
 // Client token:
-int token;
-bool a;
+int clientToken;
+
 // Buffers for reading and writing data:
 char terminalInput[MAX_BUFFER_SIZE], serverData[MAX_BUFFER_SIZE];
 
-// Quit signal:
-int quitting = 0;
-
-int openServerChannels(){
+bool openServerChannels(){
 
 	printf(clientStarted);
 	
@@ -23,12 +20,12 @@ int openServerChannels(){
 	// Error checking:
 	if(serverInput == -1 || serverOutput == -1){
 		printf(fifoNotOppened);
-		return 0;
+		return false;
 	}
 
 	printf(connectedToServer);
 
-	return 1;
+	return true;
 }
 
 void readDataFromTerminal(){
@@ -38,10 +35,10 @@ void readDataFromTerminal(){
 	terminalInput[strlen(terminalInput) - 1] = 0;
 }
 
-int isInputValid(){
+bool isInputValid(){
 	// Check empty command:
 	if(strlen(terminalInput) == 0)
-		return 0;
+		return false;
 
 	// Check input length:
 	if(strlen(terminalInput) > MAX_BUFFER_SIZE){
@@ -51,7 +48,7 @@ int isInputValid(){
 		int c;
 		while ((c = getchar()) != '\n' && c != EOF);
 
-		return 0;
+		return false;
 	}
 
 	// Check if input is alfa-num or safe character:
@@ -63,77 +60,76 @@ int isInputValid(){
 			strchr(safeCharacters, terminalInput[i])
 		)){
 			printf(commandMustBeAlphanum);
-			return 0;
+			return false;
 		}
 
-	return 1;
+	return true;
 }
 
-int sendDataToServer(){
+bool sendDataToServer(){
 	// Send authentification token:
-	if(write(serverInput, &token, sizeof(int)) == -1){
+	if(write(serverInput, &clientToken, sizeof(int)) == -1){
 		printf(dataNotSent);
-		return 0;
+		return false;
 	}
 
 	// Send buffer size:
 	int dataSize = strlen(terminalInput);
 	if(write(serverInput, &dataSize, sizeof(int)) == -1){
 		printf(dataNotSent);
-		return 0;
+		return false;
 	}
 
-	// Send actual data:
+	// Send buffer:
 	if(write(serverInput, terminalInput, dataSize) == -1){
 		printf(dataNotSent);
-		return 0;
+		return false;
 	}
 	
-	return 1;
+	return true;
 }
 
 int receiveDataFromServer(){
 	strcpy(serverData, "");
 
 	// Get token from server:
-	if(read(serverOutput, &token, sizeof(int)) == -1){
+	if(read(serverOutput, &clientToken, sizeof(int)) == -1){
 		printf(dataNotReceived);
-		return 0;
+		return false;
 	}
 
 	// Get response buffer size:
 	int bufferSize = 0;
 	if(read(serverOutput, &bufferSize, sizeof(int)) == -1){
 		printf(dataNotReceived);
-		return 0;
+		return false;
 	}
 
 	// Get response:
 	if(read(serverOutput, serverData, bufferSize) == -1){
 		printf(dataNotReceived);
-		return 0;
+		return false;
 	}
 
 	// Use first "bufferSize" characters:
 	serverData[bufferSize] = 0;
 
 	// Quit token:
-	if(token == -1)
-		quitting = 1;
+	if(clientToken == -1){
+		printf(quitMessage);
+		exit(0);
+	}
 
-	printf("%d %d %s\n", token, bufferSize, serverData);
-
-	return 1;
+	return true;
 }
 
 void showData(){
-
 	printf("%s", serverData);
 }
 
 void communicateWithServer(){
 	// Infinite loop:
-	while(!quitting){
+	while(true){
 		readDataFromTerminal();
 		if(isInputValid() && sendDataToServer() && receiveDataFromServer())
 			showData();

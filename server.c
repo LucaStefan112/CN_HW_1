@@ -10,13 +10,13 @@ int clientToken;
 char request[MAX_BUFFER_SIZE], response[MAX_BUFFER_SIZE];
 
 // List of all logged users;
-char loggedUsersList[maxLoggedUsers][100];
-
-// Quitting signal:
-bool quitting;
+char loggedUsersList[maxLoggedUsers][MAX_BUFFER_SIZE];
 
 // List of logged users tokens:
 int loggedUsersTokens[maxLoggedUsers], numberOfLoggedUsers;
+
+// Debugger mode:
+bool debuggerMode;
 
 void createFifos(){
 	mkfifo(serverIn, 0666);
@@ -24,7 +24,8 @@ void createFifos(){
 }
 
 bool openServerChannels(){
-	printf(serverStarted);
+	if(debuggerMode)
+		printf(serverStarted);
 
 	// Opening FIFO's:
 	serverInput = open(serverIn, O_RDONLY);
@@ -36,7 +37,8 @@ bool openServerChannels(){
 		return false;
 	}
 
-	printf(clientConnected);
+	if(debuggerMode)
+		printf(clientConnected);
 
 	return true;
 }
@@ -66,6 +68,9 @@ bool readDataFromClient(){
 	// Use first "bufferSize" characters:
 	request[bufferSize] = 0;
 
+	if(debuggerMode)
+		printf("Request: %d | %d | %s\n", clientToken, bufferSize, request);
+
 	return true;
 }
 
@@ -79,7 +84,10 @@ bool sendDataToClient(){
 			printf(dataNotSent);
 			return false;
 		}
-	printf("%d %d %s\n", clientToken, bufferSize, response);
+
+	if(debuggerMode)
+		printf("Response: %d | %d | %s\n", clientToken, bufferSize, response);
+
 	return true;
 }
 
@@ -165,6 +173,7 @@ bool child_parentCommunication(int pid, int channel, bool loginCommand){
 				loggedUsersTokens[numberOfLoggedUsers++] = clientToken;
 			}
 		}
+		close(channel);
 	}
 	// Child code:
 	else{
@@ -196,6 +205,8 @@ bool child_parentCommunication(int pid, int channel, bool loginCommand){
 				}
 			}
 		}
+		close(channel);
+		exit(0);
 	}
 	return true;
 }
@@ -208,11 +219,10 @@ bool respondToCLient(){
 
 	// Command "login : username":
 	if(!regexec(&loginPrefixRegex, request, 0, NULL, 0)){
-		// Check if client is already logged in:
+		// Check if client is already authentificated:
 		if(clientToken){
 			strcpy(response, clientAlreadyLogged);
-			sendDataToClient();
-			return true;
+			return sendDataToClient();
 		}
 		
 		int thisPipe[2], pid;
@@ -234,9 +244,7 @@ bool respondToCLient(){
 
 			bool communicationStatus;
 			if((communicationStatus = child_parentCommunication(pid, thisPipe[0], true)))
-				sendDataToClient();
-
-			close(thisPipe[0]);
+				return sendDataToClient();
 			return communicationStatus;
 		}
 
@@ -252,8 +260,6 @@ bool respondToCLient(){
 			if(!strcmp(requestedUser, loggedUsersList[i])){
 				strcpy(response, alreadyLogged);
 				child_parentCommunication(pid, thisPipe[1], true);
-				close(thisPipe[1]);
-				exit(0);
 			}
 
 		// Check if user exists:
@@ -287,60 +293,46 @@ bool respondToCLient(){
 
 				strcpy(response, loggedIn);
 				child_parentCommunication(pid, thisPipe[1], true);
-				close(thisPipe[1]);
-				exit(0);
 			}
 		}
 		// User not found:
 		strcpy(response, userNotFound);
 		child_parentCommunication(pid, thisPipe[1], true);
-		close(thisPipe[1]);
-		exit(0);
 	}
 
 	// Command "get-logged-users":
 	else if(!strcmp(request, loggedUsers)){
+		// Check if client is authentificated:
+		if(!clientToken){
+			strcpy(response, notLoggedIn);
+			return sendDataToClient();
+		}
+		
 		int thisPipe[2], pid;
 		
+		// Check for pipe error:
 		if(pipe(thisPipe) == -1){
 			printf(pipeError);
-			return 1;
+			return false;
 		}
-
+		// Check for fork error:
 		if((pid = fork()) == -1){
 			printf(forkError);
-			return 1;
+			return false;
 		}
 		
 		// Parent code:
 		if(pid){
 			close(thisPipe[1]);
-			int thisBufferSize;
-			
-			read(thisPipe[0], &clientToken, sizeof(int));
-			read(thisPipe[0], &thisBufferSize, sizeof(int));
-			read(thisPipe[0], response, thisBufferSize);
-			response[thisBufferSize] = 0;
-			wait(NULL);
 
-			sendDataToClient();
-			close(thisPipe[0]);
-			return 0;
+			bool communicationStatus;
+			if((communicationStatus = child_parentCommunication(pid, thisPipe[0], false)))
+				return sendDataToClient();
+			return communicationStatus;
 		}
 
 		// Child code:
 		close(thisPipe[0]);
-		
-		//Check if client is authentificated:
-		if(!clientToken){
-			strcpy(response, notLoggedIn);
-			int thisBufferSize = strlen(response);
-			write(thisPipe[1], &clientToken, sizeof(int));
-			write(thisPipe[1], &thisBufferSize, sizeof(int));
-			write(thisPipe[1], response, strlen(response));
-			quitting = 1;
-			return 0;
-		}
 		
 		// Create utmp pointer:
 		strcpy(response, "\0");
@@ -350,31 +342,27 @@ bool respondToCLient(){
 		while(utmpPointer){
 			// Transforming seconds from int32_t to char*:
 			int32_t seconds = utmpPointer->ut_tv.tv_sec, stringLength = 0;
-			char secondsString[50];
+			char secondsToString[50];
 			do{
-				secondsString[stringLength++] = '0' + seconds % 10;
+				secondsToString[stringLength++] = '0' + seconds % 10;
 				seconds /= 10;
 			}while(seconds);
-			secondsString[stringLength] = 0;
+			secondsToString[stringLength] = 0;
 
-			if(strlen(utmpPointer->ut_user) && strlen(utmpPointer->ut_host) && strlen(secondsString)){
+			// Concatenating data:
+			if(strlen(utmpPointer->ut_user) && strlen(utmpPointer->ut_host) && strlen(secondsToString)){
 			 	strcat(response, "User: \0");
 			 	strcat(response, utmpPointer->ut_user);
 			 	strcat(response, " Host: \0");
 			 	strcat(response, utmpPointer->ut_host);
 			 	strcat(response, " Seconds active: \0");
-			 	strcat(response, secondsString);
+			 	strcat(response, secondsToString);
 			 	strcat(response, "\n\0");
 			}
 			utmpPointer = getutent();
 		}
 
-		int thisBufferSize = strlen(response);
-		write(thisPipe[1], &clientToken, sizeof(int));
-		write(thisPipe[1], &thisBufferSize, sizeof(int));
-		write(thisPipe[1], response, strlen(response));
-		quitting = 1;
-		return 0;
+		child_parentCommunication(pid, thisPipe[1], false);
 	}
 
 	// Command "get-proc-info : pid":
@@ -382,49 +370,40 @@ bool respondToCLient(){
 		//Check if client is authentificated:
 		if(!clientToken){
 			strcpy(response, notLoggedIn);
-			sendDataToClient();
-			return 0;
+			return sendDataToClient();
 		}
 
 		int thisSocketpair[2], pid;
 		
+		// Check for socketpair error:
 		if(socketpair(AF_UNIX, SOCK_STREAM, 0, thisSocketpair) == -1){
 			printf(socketpairError);
-			return 1;
+			return false;
 		}
-
+		// Check for fork error:
 		if((pid = fork()) == -1){
 			printf(forkError);
-			return 1;
+			return false;
 		}
 		
 		// Parent code:
 		if(pid){
 			close(thisSocketpair[1]);
-			int thisBufferSize;
-			
-			read(thisSocketpair[0], &thisBufferSize, sizeof(int));
-			read(thisSocketpair[0], response, thisBufferSize);
 
-			for(int i = 0; i < numberOfLoggedUsers; i++)
-				read(thisSocketpair[0], &loggedUsersTokens[i], sizeof(int));
-
-			response[thisBufferSize] = 0;
-			wait(NULL);
-
-			sendDataToClient();
-			close(thisSocketpair[0]);
-			return 0;
+			bool communicationStatus;
+			if((communicationStatus = child_parentCommunication(pid, thisSocketpair[0], false)))
+				return sendDataToClient();
+			return communicationStatus;
 		}
 
 		// Child code:
 		close(thisSocketpair[0]);
 
-		char pidProcess[20], processFilePath[50] = "\0";
+		// Creating path to process file:
+		char pidProcess[20], processFilePath[50];
 		strcpy(pidProcess, request + strlen(processInfoPrefix) - 1);
 
-		// Creating path to process file:
-		strcat(processFilePath, "/proc/");
+		strcpy(processFilePath, "/proc/");
 		strcat(processFilePath, pidProcess);
 		strcat(processFilePath, "/status");
 
@@ -432,13 +411,10 @@ bool respondToCLient(){
 
 		if(!filePointer){
 			strcpy(response, invalidProcess);
-			int thisBufferSize = strlen(response);
-			write(thisSocketpair[1], &thisBufferSize, sizeof(int));
-			write(thisSocketpair[1], response, strlen(response));
-			quitting = 1;
-			return 0;
+			child_parentCommunication(pid, thisSocketpair[1], false);
 		}
 
+		// Reading each field:
     	char field[100];
 		strcpy(response, "\0");
 
@@ -452,11 +428,7 @@ bool respondToCLient(){
 			)
 				strcat(response, field);
 
-		int thisBufferSize = strlen(response);
-		write(thisSocketpair[1], &thisBufferSize, sizeof(int));
-		write(thisSocketpair[1], response, strlen(response));
-		quitting = 1;
-		return 0;
+		child_parentCommunication(pid, thisSocketpair[1], false);
 	}
 
 	// Command "logout":
@@ -464,23 +436,23 @@ bool respondToCLient(){
 		//Check if client is authentificated:
 		if(!clientToken){
 			strcpy(response, notLoggedIn);
-			sendDataToClient();
-			return 0;
+			return sendDataToClient();
 		}
 
 		// Removing user from logged users:
 		for(int i = 0; i < numberOfLoggedUsers; i++)
 			if(clientToken == loggedUsersTokens[i]){
 				loggedUsersTokens[i] = loggedUsersTokens[numberOfLoggedUsers - 1];
+				loggedUsersTokens[numberOfLoggedUsers - 1] = 0;
 				strcpy(loggedUsersList[i], loggedUsersList[numberOfLoggedUsers - 1]);
+				strcpy(loggedUsersList[numberOfLoggedUsers - 1], "");
 				numberOfLoggedUsers--;
 				break;
 			}
 
 		clientToken = 0;
 		strcpy(response, loggedOut);
-		sendDataToClient();
-		return 0;
+		return sendDataToClient();
 	}
 
 	// Command "quit":
@@ -488,17 +460,15 @@ bool respondToCLient(){
 		clientToken = -1;
 		strcpy(response, quitMessage);
 		sendDataToClient();
-
-		// Closing app signal:
-		quitting = 1;
-		return 0;
+		if(debuggerMode)
+			printf(quitMessage);
+		exit(0);
 	}
 
 	// Unknown command:
 	else{
 		strcpy(response, unknownCommand);
-		sendDataToClient();
-		return 0;
+		return sendDataToClient();
 	}
 }
 
@@ -510,20 +480,22 @@ void closeServerChannels(){
 
 void communicateWithClient(){
 	//Infinite loop:
-	while(!quitting)
+	while(true)
 		// Execute stages sequentially:
-		if(!readDataFromClient() || !isRequestValid() || !respondToCLient());
+		if(readDataFromClient() && isRequestValid() && respondToCLient());
 }
 
-int main(){
+int main(int argc, char* argv[]){
 	srand(time(NULL));
 
 	createFifos();
 
-	if(!openServerChannels())
-		return 1;
+	debuggerMode = (argc == 2 && !strcpy(argv[1], "debugger"));
 
-	communicateWithClient();
+	if(!openServerChannels())
+		exit(1);
+
+	communicateWithClient(argc, argv);
 
 	closeServerChannels();
 
