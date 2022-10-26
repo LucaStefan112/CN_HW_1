@@ -1,38 +1,11 @@
-#include <stdio.h>
-#include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-
-// FIFO names:
-#define serverIn "SERVER_INPUT"
-#define serverOut "SERVER_OUTPUT"
-
-// Error messages:
-#define fifoNotOppened "Could not open FIFO's!\n"
-#define dataNotSent "Could not send data to server!\n"
-#define dataNotReceived "Could not receive data from server!\n"
-
-// System messages:
-#define started "Client started!\n"
-#define connected "Connected to server!\n"
-#define comandExceedsLength "Command too long!\n"
-#define commandMustBeAlphanum "Command must be use safe characters(a/A-z/Z, 0-9, '-', '_', ' ', ':')!\n"
-
-// Comands:
-#define quit "quit"
-
-// Max command size:
-#define MAX_BUFFER_SIZE 500
-
-// Safe characters list:
-#define safeCharacters "_- :,.+=/?!@#$"
+#include "./all_libs.h"
 
 // File descriptors for FIFO's:
 int serverInput, serverOutput;
 
 // Client token:
 int token;
-
+bool a;
 // Buffers for reading and writing data:
 char terminalInput[MAX_BUFFER_SIZE], serverData[MAX_BUFFER_SIZE];
 
@@ -41,7 +14,7 @@ int quitting = 0;
 
 int openServerChannels(){
 
-	printf(started);
+	printf(clientStarted);
 	
 	// Opening FIFO's:
 	serverInput = open(serverIn, O_WRONLY);
@@ -53,7 +26,7 @@ int openServerChannels(){
 		return 0;
 	}
 
-	printf(connected);
+	printf(connectedToServer);
 
 	return 1;
 }
@@ -120,6 +93,8 @@ int sendDataToServer(){
 }
 
 int receiveDataFromServer(){
+	strcpy(serverData, "");
+
 	// Get token from server:
 	if(read(serverOutput, &token, sizeof(int)) == -1){
 		printf(dataNotReceived);
@@ -146,10 +121,13 @@ int receiveDataFromServer(){
 	if(token == -1)
 		quitting = 1;
 
+	printf("%d %d %s\n", token, bufferSize, serverData);
+
 	return 1;
 }
 
 void showData(){
+
 	printf("%s", serverData);
 }
 

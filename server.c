@@ -1,73 +1,7 @@
-#include <stdio.h>
-#include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <stdlib.h>
-#include <utmp.h>
-#include <regex.h>
-#include <sys/wait.h>
-#include <sys/socket.h>
-
-// FIFO names:
-#define serverIn "SERVER_INPUT"
-#define serverOut "SERVER_OUTPUT"
-
-// Users list file:
-#define usersFile "USERS"
-
-// Maximum number of logged users:
-#define maxLoggedUsers 100
-
-// System messages:
-#define started "Server started!\n"
-#define connected "New client connected!\n"
-
-// Error messages:
-#define fifoNotOppened "Could not open FIFO's!\n"
-#define dataNotSent "Could not send data to client!\n"
-#define dataNotReceived "Could not receive data from client!\n"
-#define bufferSizeMismatch "The buffer size does not match the payload value!\n"
-#define bufferOverflow "The request is too large!\n"
-#define pipeError "Pipe error!\n"
-#define socketpairError "Socketpair error!\n"
-#define forkError "Fork error!\n"
-
-// Comands:
-#define loginPrefix "login : *"
-#define loggedUsers "get-logged-users"
-#define processInfoPrefix "get-proc-info : *"
-#define logout "logout"
-#define quit "quit"
-
-// Responses:
-#define badRequest "Bad request!\n"
-#define alreadyLogged "The user is already logged!\n"
-#define loggedIn "Logged in!\n"
-#define userNotFound "User not found!\n"
-#define clientAlreadyLogged "You are already logged in!\n"
-#define notLoggedIn "You are not logged in!\n"
-#define invalidProcess "The process does not exist!\n"
-#define loggedOut "Logged out!\n"
-#define quitMessage "Good bye!\n"
-#define unknownCommand "Command does not exist!\n"
-
-// Maximum buffer size:
-#define MAX_BUFFER_SIZE 500
-
-// Safe characters list:
-#define safeCharacters "_- :,.+=/?!@#$"
-
-// Default token:
-#define defaultToken 0
+#include "./all_libs.h"
 
 // File descriptors for FIFO's:
 int serverInput, serverOutput;
-
-// Buffer size:
-int bufferSize;
 
 // Client token:
 int clientToken;
@@ -79,7 +13,7 @@ char request[MAX_BUFFER_SIZE], response[MAX_BUFFER_SIZE];
 char loggedUsersList[maxLoggedUsers][100];
 
 // Quitting signal:
-int quitting = 0;
+bool quitting;
 
 // List of logged users tokens:
 int loggedUsersTokens[maxLoggedUsers], numberOfLoggedUsers;
@@ -89,8 +23,8 @@ void createFifos(){
 	mkfifo(serverOut, 0666);
 }
 
-int openServerChannels(){
-	printf(started);
+bool openServerChannels(){
+	printf(serverStarted);
 
 	// Opening FIFO's:
 	serverInput = open(serverIn, O_RDONLY);
@@ -99,60 +33,67 @@ int openServerChannels(){
 	// Error checking:
 	if(serverInput == -1 || serverOutput == -1){
 		printf(fifoNotOppened);
-		return 0;
+		return false;
 	}
 
-	printf(connected);
+	printf(clientConnected);
 
-	return 1;
+	return true;
 }
 
-int readDataFromClient(){
+bool readDataFromClient(){
+	int bufferSize = 0;
+	strcpy(request, "");
+
 	// Get client's authentification token:
 	if(read(serverInput, &clientToken, sizeof(int)) == -1){
 		printf(dataNotReceived);
-		return 0;
+		return false;
 	}
 
 	// Get request buffer size:
 	if(read(serverInput, &bufferSize, sizeof(int)) == -1){
 		printf(dataNotReceived);
-		return 0;
+		return false;
 	}
 
 	// Get request data:
 	if(read(serverInput, request, bufferSize) == -1){
 		printf(dataNotReceived);
-		return 0;
+		return false;
 	}
 
 	// Use first "bufferSize" characters:
 	request[bufferSize] = 0;
 
-	return 1;
+	return true;
 }
 
-void sendDataToClient(){
+bool sendDataToClient(){
 	int bufferSize = strlen(response);
+	response[bufferSize] = 0;
 	if(
 		write(serverOutput, &clientToken, sizeof(int)) == -1 ||
 		write(serverOutput, &bufferSize, sizeof(int)) == -1 ||
-		write(serverOutput, response, bufferSize) == -1)
+		write(serverOutput, response, bufferSize) == -1){
 			printf(dataNotSent);
-		printf("%d %d %s", clientToken, bufferSize, response);
+			return false;
+		}
+	printf("%d %d %s\n", clientToken, bufferSize, response);
+	return true;
 }
 
-int isRequestValid(){
+bool isRequestValid(){
 	// Generate prefix regex expressions for "login" and "process informations":
 	regex_t loginPrefixRegex, processInfoPrefixRegex;
     regcomp(&loginPrefixRegex, loginPrefix, 0);
 	regcomp(&processInfoPrefixRegex, processInfoPrefix, 0);
 
 	// Check buffer size:
-	if(bufferSize > MAX_BUFFER_SIZE){
+	if(strlen(response) > MAX_BUFFER_SIZE){
 		strcpy(response, badRequest);
 		sendDataToClient();
-		return 0;
+		return false;
 	}
 
 	// Check if input is alfa-num or safe character:
@@ -165,22 +106,101 @@ int isRequestValid(){
 		)){
 			strcpy(response, badRequest);
 			sendDataToClient();
-			return 0;
+			return false;
 		}
+	
+	// Check maximum number of logged users:
+	if(numberOfLoggedUsers == maxLoggedUsers){
+		strcpy(response, numberOfLoggedUsersExceeded);
+		return false;
+	}
 
 	// Check is token is active:
 	else if(clientToken){
 		for(int i = 0; i < numberOfLoggedUsers; i++)
 			if(clientToken == loggedUsersTokens[i])
-				return 1;
+				return true;
 		
 		sendDataToClient();
-		return 0;
+		return false;
 	}
-	return 1;
+	return true;
 }
 
-int respondToCLient(){
+bool child_parentCommunication(int pid, int channel, bool loginCommand){
+	// Parent code:
+	if(pid){
+		int bufferSize = 0;
+		// Reading buffer size:
+		if(read(channel, &bufferSize, sizeof(bufferSize)) == -1){
+			printf(dataNotReceived);
+			return false;
+		}
+		// Reading buffer:
+		if(read(channel, response, bufferSize) == -1){
+			printf(dataNotReceived);
+			return false;
+		}
+		response[bufferSize] = 0;
+
+		// Login custom communication:
+		if(loginCommand){
+			// Reading client token:
+			if(read(channel, &clientToken, sizeof(clientToken)) == -1){
+				printf(dataNotReceived);
+				return false;
+			}
+			// New logged user:
+			if(clientToken){
+				// Saving the name of the logged user:
+				if(read(channel, &bufferSize, sizeof(bufferSize)) == -1){
+					printf(dataNotReceived);
+					return false;
+				}
+				if(read(channel, loggedUsersList[numberOfLoggedUsers], sizeof(loggedUsersList[numberOfLoggedUsers])) == -1){
+					printf(dataNotReceived);
+					return false;
+				}
+
+				loggedUsersTokens[numberOfLoggedUsers++] = clientToken;
+			}
+		}
+	}
+	// Child code:
+	else{
+		int bufferSize = strlen(response);
+		if(write(channel, &bufferSize, sizeof(bufferSize)) == -1 || write(channel, response, bufferSize) == -1){
+			printf(dataNotSent);
+			return false;
+		}
+		response[bufferSize] = 0;
+
+		// Login custom communication:
+		if(loginCommand){
+			// Writing client token:
+			if(write(channel, &clientToken, sizeof(clientToken)) == -1){
+				printf(dataNotSent);
+				return false;
+			}
+			// New user logged:
+			if(clientToken){
+				// Sending the name of the new user:
+				bufferSize = strlen(loggedUsersList[numberOfLoggedUsers - 1]);
+				if(write(channel, &bufferSize, sizeof(bufferSize)) == -1){
+					printf(dataNotSent);
+					return false;
+				}
+				if(write(channel, loggedUsersList[numberOfLoggedUsers - 1], sizeof(loggedUsersList[numberOfLoggedUsers - 1])) == -1){
+					printf(dataNotSent);
+					return false;
+				}
+			}
+		}
+	}
+	return true;
+}
+
+bool respondToCLient(){
 	// Generate prefix regex expressions for "login" and "process informations":
 	regex_t loginPrefixRegex, processInfoPrefixRegex;
     regcomp(&loginPrefixRegex, loginPrefix, 0);
@@ -192,126 +212,90 @@ int respondToCLient(){
 		if(clientToken){
 			strcpy(response, clientAlreadyLogged);
 			sendDataToClient();
-			return 0;
+			return true;
 		}
 		
 		int thisPipe[2], pid;
 		
+		// Check for pipe error:
 		if(pipe(thisPipe) == -1){
 			printf(pipeError);
-			return 1;
+			return false;
 		}
-
+		// Check for fork error:
 		if((pid = fork()) == -1){
 			printf(forkError);
-			return 1;
+			return false;
 		}
 		
 		// Parent code:
 		if(pid){
 			close(thisPipe[1]);
-			int thisBufferSize;
-			
-			read(thisPipe[0], &clientToken, sizeof(int));
-			read(thisPipe[0], &thisBufferSize, sizeof(int));
-			read(thisPipe[0], response, thisBufferSize);
-			read(thisPipe[0], &numberOfLoggedUsers, sizeof(int));
 
-			for(int i = 0; i < numberOfLoggedUsers; i++)
-				read(thisPipe[0], &loggedUsersTokens[i], sizeof(int));
+			bool communicationStatus;
+			if((communicationStatus = child_parentCommunication(pid, thisPipe[0], true)))
+				sendDataToClient();
 
-			response[thisBufferSize] = 0;
-			wait(NULL);
-
-			sendDataToClient();
 			close(thisPipe[0]);
-			return 0;
+			return communicationStatus;
 		}
 
 		// Child code:
 		close(thisPipe[0]);
 
 		// Getting username from request:
-		char user[100];
-		strcpy(user, request + strlen(loginPrefix) - 1);
+		char requestedUser[MAX_BUFFER_SIZE];
+		strcpy(requestedUser, request + strlen(loginPrefix) - 1);
 		
-		// Client is not logged in:
-		if(clientToken == 0){
-			for(int i = 0; i < numberOfLoggedUsers; i++)
-				// Account is already in use at the moment:
-				if(!strcmp(user, loggedUsersList[i])){
-					strcpy(response, alreadyLogged);
-					
-					int dontSendTokens = 0;
-					int thisBufferSize = strlen(response);
-					write(thisPipe[1], &clientToken, sizeof(int));
-					write(thisPipe[1], &thisBufferSize, sizeof(int));
-					write(thisPipe[1], response, strlen(response));
-					write(thisPipe[1], &dontSendTokens, sizeof(int));
-					quitting = 1;
-					return 0;
-				}
-
-			// Check if user exists:
-			FILE* usersFilePointer = fopen(usersFile, "r");
-			char username[100];
-			while(fgets(username, sizeof(username), usersFilePointer)){
-				// Remove '\n' character:
-				username[strlen(username) - 1] = 0;
-
-				// If username exists:
-				if(!strcmp(user, username)){
-					// Create new token for client:
-					int tokenIsNew;
-					do{
-						tokenIsNew = 1;
-						clientToken = rand() % maxLoggedUsers;
-
-						for(int i = 0; i < numberOfLoggedUsers && tokenIsNew; i++)
-							if(clientToken == loggedUsersTokens[i])
-								tokenIsNew = 0;
-					}while(!tokenIsNew);
-
-					// Add user to logged users lists:
-					strcpy(loggedUsersList[numberOfLoggedUsers], user);
-					loggedUsersTokens[numberOfLoggedUsers] = clientToken;
-					numberOfLoggedUsers++;
-
-					strcpy(response, loggedIn);
-					int thisBufferSize = strlen(response);
-					write(thisPipe[1], &clientToken, sizeof(int));
-					write(thisPipe[1], &thisBufferSize, sizeof(int));
-					write(thisPipe[1], response, strlen(response));
-					write(thisPipe[1], &numberOfLoggedUsers, sizeof(int));
-					for(int i = 0; i < numberOfLoggedUsers; i++)
-						write(thisPipe[1], &loggedUsersTokens[i], sizeof(int));
-
-					quitting = 1;
-					return 0;
-				}
+		// Check if account is already in use at the moment:
+		for(int i = 0; i < numberOfLoggedUsers; i++)
+			if(!strcmp(requestedUser, loggedUsersList[i])){
+				strcpy(response, alreadyLogged);
+				child_parentCommunication(pid, thisPipe[1], true);
+				close(thisPipe[1]);
+				exit(0);
 			}
-			int dontSendTokens = 0;
-			strcpy(response, userNotFound);
-			int thisBufferSize = strlen(response);
-			write(thisPipe[1], &clientToken, sizeof(int));
-			write(thisPipe[1], &thisBufferSize, sizeof(int));
-			write(thisPipe[1], response, strlen(response));
-			write(thisPipe[1], &dontSendTokens, sizeof(int));
-			quitting = 1;
-			return 0;
-		}
 
-		// Client logged in another account:
-		
-		strcpy(response, clientAlreadyLogged);
-		int dontSendTokens = 0;
-		int thisBufferSize = strlen(response);
-		write(thisPipe[1], &clientToken, sizeof(int));
-		write(thisPipe[1], &thisBufferSize, sizeof(int));
-		write(thisPipe[1], response, strlen(response));
-		write(thisPipe[1], &dontSendTokens, sizeof(int));
-		quitting = 1;
-		return 0;
+		// Check if user exists:
+		FILE* usersFilePointer = fopen(usersFile, "r");
+		char username[MAX_BUFFER_SIZE];
+
+		while(fgets(username, sizeof(username), usersFilePointer)){
+
+			// Remove '\n' character:
+			username[strlen(username) - 1] = 0;
+
+			// If username exists:
+			if(!strcmp(requestedUser, username)){
+
+				// Create new token for client:
+				for(int i = 1; i <= maxLoggedUsers; i++){
+					bool tokenUsed = false;
+					for(int j = 0; j < numberOfLoggedUsers && !tokenUsed; j++)
+						if(loggedUsersTokens[j] == i)
+							tokenUsed = true;
+					
+					if(!tokenUsed){
+						clientToken = i;
+						break;
+					}
+				}
+
+				// Add user to logged users lists:
+				strcpy(loggedUsersList[numberOfLoggedUsers], username);
+				numberOfLoggedUsers++;
+
+				strcpy(response, loggedIn);
+				child_parentCommunication(pid, thisPipe[1], true);
+				close(thisPipe[1]);
+				exit(0);
+			}
+		}
+		// User not found:
+		strcpy(response, userNotFound);
+		child_parentCommunication(pid, thisPipe[1], true);
+		close(thisPipe[1]);
+		exit(0);
 	}
 
 	// Command "get-logged-users":
