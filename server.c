@@ -174,6 +174,7 @@ bool child_parentCommunication(int pid, int channel, bool loginCommand){
 			}
 		}
 		close(channel);
+		wait(NULL);
 	}
 	// Child code:
 	else{
@@ -490,7 +491,7 @@ int main(int argc, char* argv[]){
 
 	createFifos();
 
-	debuggerMode = (argc == 2 && !strcpy(argv[1], "debugger"));
+	debuggerMode = (argc == 2 && !strcmp(argv[1], "debugger"));
 
 	if(!openServerChannels())
 		exit(1);
